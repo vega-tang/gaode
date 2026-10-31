@@ -14,11 +14,10 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceError;
-import android.webkit.WebResourceResponse;
 
 import org.json.JSONObject;
+import org.json.JSONTokener;
 
-import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -34,11 +33,14 @@ public class MainActivity extends Activity {
     private String placeAddress = "";
 
     private boolean finished = false;
-    private boolean pageLoadFailed = false;
+    private boolean mainPageError = false;
+
     private int attempts = 0;
 
     private static final int MAX_ATTEMPTS = 15;
     private static final long RETRY_INTERVAL = 1200;
+
+    private Toast currentToast;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,11 +55,16 @@ public class MainActivity extends Activity {
         handleIncomingIntent(intent);
     }
 
+    // =====================================================
+    // 接收啟動及分享 Intent
+    // =====================================================
+
     private void handleIncomingIntent(Intent intent) {
+
         cleanupWebViewOnly();
 
         finished = false;
-        pageLoadFailed = false;
+        mainPageError = false;
         attempts = 0;
 
         sharedText = "";
@@ -66,16 +73,36 @@ public class MainActivity extends Activity {
         placeAddress = "";
 
         if (intent == null) {
-            finish();
+            showLaunchHint();
             return;
         }
 
         String action = intent.getAction();
 
+        // 直接開啟 App
+        if (Intent.ACTION_MAIN.equals(action)
+                || action == null) {
+
+            showLaunchHint();
+            return;
+        }
+
+        // Google Maps 分享
         if (Intent.ACTION_SEND.equals(action)) {
+
             sharedText = intent.getStringExtra(Intent.EXTRA_TEXT);
 
+            if (sharedText == null) {
+                CharSequence extra =
+                        intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+
+                if (extra != null) {
+                    sharedText = extra.toString();
+                }
+            }
+
         } else if (Intent.ACTION_VIEW.equals(action)) {
+
             Uri data = intent.getData();
 
             if (data != null) {
@@ -89,18 +116,57 @@ public class MainActivity extends Activity {
 
         googleUrl = findGoogleUrl(sharedText);
 
+        // 分享進來但沒有 Google Maps 網址
         if (googleUrl.isEmpty()) {
+
             placeName = cleanText(sharedText);
-            openAmapSearch();
+
+            if (!placeName.isEmpty()) {
+                openAmapSearch();
+            } else {
+                showLaunchHint();
+            }
+
             return;
         }
 
-        // 不從原始分享網址解析座標。
-        // 只讓 WebView 載入 Google Maps 後解析網頁內容。
+        showToast("正在讀取 Google Maps 地點…");
+
+        // 不解析原始分享網址座標
+        // 交由 WebView 載入網頁後取得資料
         startGoogleWebView(googleUrl);
     }
 
+    private void showLaunchHint() {
+
+        showToast(
+                "請先開啟 Google 地圖，再分享給高德轉換器"
+        );
+
+        handler.postDelayed(() -> finish(), 1800);
+    }
+
+    private void showToast(String message) {
+
+        if (currentToast != null) {
+            currentToast.cancel();
+        }
+
+        currentToast = Toast.makeText(
+                this,
+                message,
+                Toast.LENGTH_LONG
+        );
+
+        currentToast.show();
+    }
+
+    // =====================================================
+    // 分享文字處理
+    // =====================================================
+
     private String findGoogleUrl(String text) {
+
         if (text == null) return "";
 
         Pattern pattern = Pattern.compile(
@@ -111,12 +177,17 @@ public class MainActivity extends Activity {
         Matcher matcher = pattern.matcher(text);
 
         while (matcher.find()) {
+
             String url = matcher.group();
+
             url = url.replaceAll("[),，。]+$", "");
 
-            if (url.contains("google.com/maps")
-                    || url.contains("maps.app.goo.gl")
-                    || url.contains("goo.gl/maps")) {
+            String lower = url.toLowerCase();
+
+            if (lower.contains("google.com/maps")
+                    || lower.contains("maps.app.goo.gl")
+                    || lower.contains("goo.gl/maps")) {
+
                 return url;
             }
         }
@@ -125,29 +196,26 @@ public class MainActivity extends Activity {
     }
 
     private String cleanText(String text) {
+
         if (text == null) return "";
 
-        String result = text.replaceAll(
+        return text.replaceAll(
                 "https?://\\S+",
                 ""
-        );
-
-        return result.trim();
+        ).trim();
     }
 
     // =====================================================
-    // WebView：載入 Google Maps 網頁
+    // WebView
     // =====================================================
 
     private void startGoogleWebView(String url) {
 
-        runOnUiThread(() -> {
+        try {
+
+            FrameLayout container = new FrameLayout(this);
 
             webView = new WebView(this);
-
-            // 讓 WebView 真正附加到 Activity，
-            // 但保持隱藏，不影響使用者畫面。
-            FrameLayout container = new FrameLayout(this);
 
             FrameLayout.LayoutParams params =
                     new FrameLayout.LayoutParams(1, 1);
@@ -156,13 +224,13 @@ public class MainActivity extends Activity {
             webView.setAlpha(0f);
 
             container.addView(webView);
+
             setContentView(container);
 
             webView.getSettings().setJavaScriptEnabled(true);
             webView.getSettings().setDomStorageEnabled(true);
             webView.getSettings().setLoadsImagesAutomatically(false);
             webView.getSettings().setBlockNetworkImage(true);
-            webView.getSettings().setJavaScriptCanOpenWindowsAutomatically(false);
 
             webView.setWebViewClient(new WebViewClient() {
 
@@ -179,22 +247,22 @@ public class MainActivity extends Activity {
                         WebView view,
                         String loadedUrl
                 ) {
+
                     super.onPageFinished(view, loadedUrl);
 
                     if (finished) return;
 
-                    pageLoadFailed = false;
+                    mainPageError = false;
 
                     if (loadedUrl != null) {
                         googleUrl = loadedUrl;
                     }
 
-                    // 網頁載入完成後，等待 Google Maps 動態資料。
                     handler.removeCallbacks(retryRunnable);
 
                     handler.postDelayed(
                             retryRunnable,
-                            1000
+                            1200
                     );
                 }
 
@@ -204,26 +272,11 @@ public class MainActivity extends Activity {
                         WebResourceRequest request,
                         WebResourceError error
                 ) {
+
                     super.onReceivedError(view, request, error);
 
                     if (request != null && request.isForMainFrame()) {
-                        pageLoadFailed = true;
-                    }
-                }
-
-                @Override
-                public void onReceivedHttpError(
-                        WebView view,
-                        WebResourceRequest request,
-                        WebResourceResponse response
-                ) {
-                    super.onReceivedHttpError(view, request, response);
-
-                    if (request != null && request.isForMainFrame()) {
-                        if (response != null
-                                && response.getStatusCode() >= 400) {
-                            pageLoadFailed = true;
-                        }
+                        mainPageError = true;
                     }
                 }
             });
@@ -232,23 +285,29 @@ public class MainActivity extends Activity {
 
             handler.postDelayed(
                     retryRunnable,
-                    2500
+                    3000
             );
-        });
+
+        } catch (Exception e) {
+
+            showFailure("無法啟動網頁解析");
+        }
     }
 
+    // =====================================================
+    // WebView JavaScript 解析
+    // =====================================================
+
     private final Runnable retryRunnable = new Runnable() {
+
         @Override
         public void run() {
-            if (finished) return;
+
+            if (finished || webView == null) return;
 
             extractFromJavaScript();
         }
     };
-
-    // =====================================================
-    // 方法 2：從載入後的 Google Maps 網頁取得資料
-    // =====================================================
 
     private void extractFromJavaScript() {
 
@@ -259,7 +318,7 @@ public class MainActivity extends Activity {
         String javascript =
                 "(function(){"
 
-                + "var u=window.location.href||'';"
+                + "var u=location.href||'';"
                 + "var t=document.title||'';"
 
                 + "var metas=document.getElementsByTagName('meta');"
@@ -275,33 +334,29 @@ public class MainActivity extends Activity {
                 + "var h=document.documentElement"
                 + "?document.documentElement.innerHTML:'';"
 
-                // 優先尋找地點詳細資料座標。
+                // 優先讀取 Google Maps 地點座標
                 + "var patterns=["
-                + "/!3d(-?\\\\d{1,3}\\\\.\\\\d+)!4d(-?\\\\d{1,3}\\\\.\\\\d+)/,"
-                + "/!2d(-?\\\\d{1,3}\\\\.\\\\d+)!3d(-?\\\\d{1,3}\\\\.\\\\d+)/,"
-                + "/@(-?\\\\d{1,3}\\\\.\\\\d+),\\\\s*(-?\\\\d{1,3}\\\\.\\\\d+)/"
+                + "new RegExp('!3d(-?[0-9.]+)!4d(-?[0-9.]+)'),"
+                + "new RegExp('!2d(-?[0-9.]+)!3d(-?[0-9.]+)'),"
+                + "new RegExp('@(-?[0-9.]+),\\\\s*(-?[0-9.]+)')"
                 + "];"
 
-                + "var sources=[u,h];"
+                + "var sources=[h,u];"
                 + "var lat='';"
                 + "var lon='';"
 
                 + "for(var p=0;p<patterns.length;p++){"
                 + "for(var s=0;s<sources.length;s++){"
-                + "var match=sources[s].match(patterns[p]);"
-                + "if(match){"
-
-                + "if(p===0){lat=match[1];lon=match[2];}"
-                + "else if(p===1){lon=match[1];lat=match[2];}"
-                + "else{lat=match[1];lon=match[2];}"
-
+                + "var q=sources[s].match(patterns[p]);"
+                + "if(q){"
+                + "if(p===1){lon=q[1];lat=q[2];}"
+                + "else{lat=q[1];lon=q[2];}"
                 + "break;"
                 + "}"
                 + "}"
                 + "if(lat&&lon)break;"
                 + "}"
 
-                // Meta 座標作為備援。
                 + "if(!lat||!lon){"
                 + "lat=m['place:location:latitude']||m['og:latitude']||'';"
                 + "lon=m['place:location:longitude']||m['og:longitude']||'';"
@@ -320,132 +375,114 @@ public class MainActivity extends Activity {
 
         webView.evaluateJavascript(
                 javascript,
-                result -> {
-
-                    if (finished) return;
-
-                    try {
-
-                        String jsonText =
-                                decodeJavascriptResult(result);
-
-                        JSONObject obj =
-                                new JSONObject(jsonText);
-
-                        String url =
-                                obj.optString("url", "");
-
-                        String title =
-                                obj.optString("title", "");
-
-                        String ogTitle =
-                                obj.optString("ogtitle", "");
-
-                        String description =
-                                obj.optString("description", "");
-
-                        String lat =
-                                obj.optString("lat", "");
-
-                        String lon =
-                                obj.optString("lon", "");
-
-                        if (!url.isEmpty()) {
-                            googleUrl = url;
-                        }
-
-                        // 只接受真正的 Google Maps 地點標題。
-                        String candidate = "";
-
-                        if (isValidPlaceTitle(title)) {
-                            candidate = cleanPlaceTitle(title);
-                        }
-
-                        if (candidate.isEmpty()
-                                && isValidPlaceTitle(ogTitle)) {
-                            candidate = cleanPlaceTitle(ogTitle);
-                        }
-
-                        if (!candidate.isEmpty()) {
-                            placeName = candidate;
-                        }
-
-                        if (isValidDescription(description)) {
-                            placeAddress = description.trim();
-                        }
-
-                        // 先使用 JavaScript 已經從網頁取出的座標。
-                        double[] coords =
-                                validCoordinates(lat, lon);
-
-                        if (coords == null) {
-                            // 再從載入後的頁面網址或頁面資料檢查。
-                            coords = findCoordinates(
-                                    googleUrl,
-                                    ""
-                            );
-                        }
-
-                        if (coords != null) {
-                            openAmapCoordinate(
-                                    coords[0],
-                                    coords[1]
-                            );
-                            return;
-                        }
-
-                    } catch (Exception ignored) {
-                    }
-
-                    if (attempts < MAX_ATTEMPTS) {
-
-                        handler.postDelayed(
-                                retryRunnable,
-                                RETRY_INTERVAL
-                        );
-
-                    } else {
-
-                        // 網頁解析失敗，不能拿錯誤標題當地名。
-                        if (!placeName.isEmpty()) {
-                            openAmapSearch();
-                        } else {
-                            showFailure();
-                        }
-                    }
-                }
+                result -> processJavaScriptResult(result)
         );
     }
 
-    private String decodeJavascriptResult(String result) {
+    private void processJavaScriptResult(String result) {
 
-        if (result == null || result.equals("null")) {
-            return "";
-        }
+        if (finished) return;
 
         try {
-            return new org.json.JSONTokener(result)
-                    .nextValue()
-                    .toString();
 
-        } catch (Exception e) {
-            return result;
+            Object decoded =
+                    new JSONTokener(result).nextValue();
+
+            JSONObject obj;
+
+            if (decoded instanceof String) {
+                obj = new JSONObject((String) decoded);
+            } else if (decoded instanceof JSONObject) {
+                obj = (JSONObject) decoded;
+            } else {
+                throw new Exception("無效的網頁資料");
+            }
+
+            String loadedUrl = obj.optString("url", "");
+            String title = obj.optString("title", "");
+            String ogTitle = obj.optString("ogtitle", "");
+            String description = obj.optString("description", "");
+
+            String lat = obj.optString("lat", "");
+            String lon = obj.optString("lon", "");
+
+            if (!loadedUrl.isEmpty()) {
+                googleUrl = loadedUrl;
+            }
+
+            // 只接受有效地點標題
+            if (isValidPlaceTitle(title)) {
+                placeName = cleanPlaceTitle(title);
+            }
+
+            if (placeName.isEmpty() && isValidPlaceTitle(ogTitle)) {
+                placeName = cleanPlaceTitle(ogTitle);
+            }
+
+            if (isValidDescription(description)) {
+                placeAddress = description.trim();
+            }
+
+            double[] coords = validCoordinates(lat, lon);
+
+            if (coords == null) {
+                coords = findCoordinates(loadedUrl);
+            }
+
+            if (coords != null) {
+
+                openAmapCoordinate(
+                        coords[0],
+                        coords[1]
+                );
+
+                return;
+            }
+
+        } catch (Exception ignored) {
+        }
+
+        if (attempts < MAX_ATTEMPTS) {
+
+            handler.postDelayed(
+                    retryRunnable,
+                    RETRY_INTERVAL
+            );
+
+        } else {
+
+            // 只有找到有效地名才交給高德搜尋
+            if (!placeName.isEmpty()) {
+
+                openAmapSearch();
+
+            } else if (!placeAddress.isEmpty()) {
+
+                placeName = placeAddress;
+                openAmapSearch();
+
+            } else {
+
+                showFailure(
+                        mainPageError
+                                ? "Google Maps 網頁載入失敗"
+                                : "無法從 Google Maps 取得地點資料"
+                );
+            }
         }
     }
 
     // =====================================================
-    // 地名及錯誤頁面判斷
+    // 地名有效性檢查
     // =====================================================
 
     private boolean isValidPlaceTitle(String title) {
 
-        if (title == null) return false;
+        if (title == null || title.trim().isEmpty()) {
+            return false;
+        }
 
-        String value = title.trim();
-
-        if (value.isEmpty()) return false;
-
-        String lower = value.toLowerCase();
+        String lower = title.toLowerCase();
 
         String[] invalid = {
                 "google maps",
@@ -453,11 +490,7 @@ public class MainActivity extends Activity {
                 "google 地图",
                 "網頁無法使用",
                 "网页无法使用",
-                "無法連線",
-                "无法连接",
                 "page not found",
-                "404",
-                "403",
                 "access denied",
                 "error",
                 "錯誤",
@@ -466,10 +499,13 @@ public class MainActivity extends Activity {
                 "please wait",
                 "sign in",
                 "登入",
-                "登录"
+                "登录",
+                "404",
+                "403"
         };
 
         for (String word : invalid) {
+
             if (lower.contains(word.toLowerCase())) {
                 return false;
             }
@@ -486,15 +522,17 @@ public class MainActivity extends Activity {
 
         String[] suffixes = {
                 " - Google Maps",
-                " - Google 地圖",
                 " · Google Maps",
+                " - Google 地圖",
                 " · Google 地圖",
                 " - Google 地图",
                 " · Google 地图"
         };
 
         for (String suffix : suffixes) {
+
             if (result.endsWith(suffix)) {
+
                 result = result.substring(
                         0,
                         result.length() - suffix.length()
@@ -516,76 +554,44 @@ public class MainActivity extends Activity {
         String lower = value.toLowerCase();
 
         return !lower.contains("google maps")
-                && !lower.contains("網頁無法使用")
                 && !lower.contains("page not found")
-                && !lower.contains("access denied");
+                && !lower.contains("access denied")
+                && !lower.contains("網頁無法使用");
     }
 
     // =====================================================
-    // 從 WebView 已載入的頁面資料尋找座標
-    // 注意：不解析最初收到的分享網址
+    // 從 WebView 已載入的頁面網址尋找座標
+    // 不讀取原始分享網址
     // =====================================================
 
-    private double[] findCoordinates(
-            String loadedUrl,
-            String html
-    ) {
+    private double[] findCoordinates(String url) {
 
-        String[] sources = {
-                html,
-                loadedUrl
-        };
+        if (url == null || url.isEmpty()) return null;
 
         Pattern dataPattern = Pattern.compile(
-                "!3d(-?\\d{1,3}\\.\\d+)!4d(-?\\d{1,3}\\.\\d+)"
+                "!3d(-?[0-9]{1,3}\\.[0-9]+)!4d(-?[0-9]{1,3}\\.[0-9]+)"
         );
+
+        Matcher m = dataPattern.matcher(url);
+
+        if (m.find()) {
+            return validCoordinates(
+                    m.group(1),
+                    m.group(2)
+            );
+        }
 
         Pattern centerPattern = Pattern.compile(
-                "!2d(-?\\d{1,3}\\.\\d+)!3d(-?\\d{1,3}\\.\\d+)"
+                "!2d(-?[0-9]{1,3}\\.[0-9]+)!3d(-?[0-9]{1,3}\\.[0-9]+)"
         );
 
-        Pattern atPattern = Pattern.compile(
-                "@(-?\\d{1,3}\\.\\d+),\\s*(-?\\d{1,3}\\.\\d+)"
-        );
+        m = centerPattern.matcher(url);
 
-        for (String source : sources) {
-
-            if (source == null || source.isEmpty()) {
-                continue;
-            }
-
-            Matcher m = dataPattern.matcher(source);
-
-            if (m.find()) {
-                double[] result = validCoordinates(
-                        m.group(1),
-                        m.group(2)
-                );
-
-                if (result != null) return result;
-            }
-
-            m = centerPattern.matcher(source);
-
-            if (m.find()) {
-                double[] result = validCoordinates(
-                        m.group(2),
-                        m.group(1)
-                );
-
-                if (result != null) return result;
-            }
-
-            m = atPattern.matcher(source);
-
-            if (m.find()) {
-                double[] result = validCoordinates(
-                        m.group(1),
-                        m.group(2)
-                );
-
-                if (result != null) return result;
-            }
+        if (m.find()) {
+            return validCoordinates(
+                    m.group(2),
+                    m.group(1)
+            );
         }
 
         return null;
@@ -606,7 +612,6 @@ public class MainActivity extends Activity {
                 return null;
             }
 
-            // 排除 (0,0) 及明顯無效值。
             if (lat == 0 && lon == 0) {
                 return null;
             }
@@ -622,10 +627,7 @@ public class MainActivity extends Activity {
     // WGS84 轉 GCJ-02
     // =====================================================
 
-    private double[] wgs84ToGcj02(
-            double lat,
-            double lon
-    ) {
+    private double[] wgs84ToGcj02(double lat, double lon) {
 
         if (outOfChina(lat, lon)) {
             return new double[]{lat, lon};
@@ -634,15 +636,8 @@ public class MainActivity extends Activity {
         double a = 6378245.0;
         double ee = 0.00669342162296594323;
 
-        double dLat = transformLat(
-                lon - 105.0,
-                lat - 35.0
-        );
-
-        double dLon = transformLon(
-                lon - 105.0,
-                lat - 35.0
-        );
+        double dLat = transformLat(lon - 105.0, lat - 35.0);
+        double dLon = transformLon(lon - 105.0, lat - 35.0);
 
         double radLat = lat / 180.0 * Math.PI;
 
@@ -652,8 +647,7 @@ public class MainActivity extends Activity {
         double sqrtMagic = Math.sqrt(magic);
 
         dLat = (dLat * 180.0)
-                / ((a * (1 - ee))
-                / (magic * sqrtMagic) * Math.PI);
+                / ((a * (1 - ee)) / (magic * sqrtMagic) * Math.PI);
 
         dLon = (dLon * 180.0)
                 / (a / sqrtMagic * Math.cos(radLat) * Math.PI);
@@ -665,7 +659,6 @@ public class MainActivity extends Activity {
     }
 
     private boolean outOfChina(double lat, double lon) {
-
         return lon < 72.004 || lon > 137.8347
                 || lat < 0.8293 || lat > 55.8271;
     }
@@ -709,13 +702,10 @@ public class MainActivity extends Activity {
     }
 
     // =====================================================
-    // 開啟高德地圖
+    // 高德跳轉
     // =====================================================
 
-    private void openAmapCoordinate(
-            double lat,
-            double lon
-    ) {
+    private void openAmapCoordinate(double lat, double lon) {
 
         if (finished) return;
 
@@ -745,17 +735,15 @@ public class MainActivity extends Activity {
 
             startActivity(intent);
 
+            cleanup();
+
         } catch (Exception e) {
 
             finished = false;
             openAmapSearch();
-            return;
         }
-
-        cleanup();
     }
 
-    // 方法 3：交給高德搜尋地名
     private void openAmapSearch() {
 
         if (finished) return;
@@ -775,11 +763,7 @@ public class MainActivity extends Activity {
         }
 
         if (keyword == null || keyword.trim().isEmpty()) {
-            keyword = cleanText(sharedText);
-        }
-
-        if (keyword == null || keyword.trim().isEmpty()) {
-            showFailure();
+            showFailure("沒有取得有效的地點名稱");
             return;
         }
 
@@ -809,26 +793,24 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showFailure() {
+    private void showFailure(String message) {
 
         if (finished) return;
 
         finished = true;
 
-        Toast.makeText(
-                this,
-                "無法讀取 Google Maps 地點，請確認網路或稍後再試",
-                Toast.LENGTH_LONG
-        ).show();
+        showToast(message);
 
-        cleanup();
+        handler.postDelayed(
+                this::cleanup,
+                2200
+        );
     }
 
     private String encode(String value) {
 
         try {
             return URLEncoder.encode(value, "UTF-8");
-
         } catch (Exception e) {
             return value;
         }
@@ -859,7 +841,6 @@ public class MainActivity extends Activity {
         if (webView != null) {
 
             webView.stopLoading();
-            webView.loadUrl("about:blank");
             webView.setWebViewClient(null);
             webView.destroy();
 
