@@ -11,22 +11,24 @@ import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLDecoder;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
 
-    // 電腦版 UA：手機版會拿到沒有座標的簡化網頁
     private static final String UA =
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-    // 跳過 Google 同意頁
     private static final String COOKIE =
         "CONSENT=PENDING+987; SOCS=CAESHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmRlIAEaBgiAo_CmBg";
 
     private static final String LAT = "([+-]?\\d{1,2}\\.\\d+)";
     private static final String LON = "([+-]?\\d{1,3}\\.\\d+)";
+
+    // 展開後的最終網址，用來取地址
+    private volatile String lastUrl = "";
 
     private void fail(String msg) {
         try {
@@ -91,11 +93,14 @@ public class MainActivity extends Activity {
                         openAmap("androidamap://viewMap?sourceApplication=gaodeshare"
                             + "&poiname=" + Uri.encode(name.isEmpty() ? "目的地" : name)
                             + "&lat=" + coords[0] + "&lon=" + coords[1] + "&dev=1");
-                    } else if (!name.isEmpty()) {
-                        Toast.makeText(this, "沒抓到座標，改用名稱搜尋", Toast.LENGTH_SHORT).show();
-                        searchByName(name);
                     } else {
-                        fail("沒抓到座標，也沒有地點名稱");
+                        String keywords = buildKeywords(name, addressFromUrl(lastUrl));
+                        if (keywords.isEmpty()) {
+                            fail("沒抓到座標，也沒有地點名稱或地址");
+                        } else {
+                            Toast.makeText(this, "沒抓到座標，改用名稱搜尋", Toast.LENGTH_SHORT).show();
+                            searchByName(keywords);
+                        }
                     }
                 });
             }).start();
@@ -104,9 +109,36 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void searchByName(String name) {
+    private boolean looksLikeAddress(String s) {
+        return Pattern.compile("[市縣區鄉鎮路街段巷號]").matcher(s).find();
+    }
+
+    /** 從 /place/... 取出地址；去掉開頭郵遞區號和「里」 */
+    private String addressFromUrl(String u) {
+        if (u == null) return "";
+        Matcher mm = Pattern.compile("/place/([^/@?]+)").matcher(u);
+        if (!mm.find()) return "";
+        try {
+            String a = URLDecoder.decode(mm.group(1).replace("+", " "), "UTF-8").trim();
+            a = a.replaceFirst("^\\d+\\s*", "");
+            a = a.replaceFirst("(?<=[區鄉鎮])[\\u4e00-\\u9fa5]{1,4}里", "");
+            return a.trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 店名 + 地址；地址看起來不像地址、或已含店名就只用店名 */
+    private String buildKeywords(String name, String addr) {
+        boolean useAddr = !addr.isEmpty() && looksLikeAddress(addr)
+            && (name.isEmpty() || !addr.contains(name));
+        if (name.isEmpty()) return useAddr ? addr : "";
+        return useAddr ? name + " " + addr : name;
+    }
+
+    private void searchByName(String keywords) {
         openAmap("androidamap://poi?sourceApplication=gaodeshare&keywords="
-            + Uri.encode(name) + "&dev=0");
+            + Uri.encode(keywords) + "&dev=0");
     }
 
     private void openAmap(String uri) {
@@ -138,6 +170,7 @@ public class MainActivity extends Activity {
         boolean retried = false;
 
         for (int i = 0; i < 10; i++) {
+            lastUrl = cur;
             String[] r = fromUrl(cur);
             if (r != null) return r;
 
@@ -152,7 +185,6 @@ public class MainActivity extends Activity {
                 continue;
             }
             if (code == 404 && !retried) {
-                // Google 短網址偶爾會先回 404，等一下再試一次
                 retried = true;
                 c.disconnect();
                 Thread.sleep(3000);
@@ -201,7 +233,6 @@ public class MainActivity extends Activity {
         if ((r = m(body, "%213d" + LAT + "%214d" + LON)) != null) return r;
         if ((r = m(body, "\\[(?:null,null,|null,\\[)" + LAT + "," + LON + "]")) != null) return r;
         if ((r = m(body, "/@" + LAT + "," + LON)) != null) return r;
-        // 網頁標題是泛用的「Google Maps」時，裡面的座標其實是你的網路位置，不能用
         if (!body.contains("<meta content=\"Google Maps\" itemprop=\"name\"")) {
             Matcher mm = Pattern.compile(
                 "APP_INITIALIZATION_STATE=\\[\\[\\[[\\d.-]+," + LON + "," + LAT).matcher(body);
