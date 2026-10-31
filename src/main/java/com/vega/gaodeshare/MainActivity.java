@@ -5,8 +5,28 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
+import android.widget.Toast;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
+
+    // 電腦版 UA：手機版會拿到沒有座標的簡化網頁
+    private static final String UA =
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+    // 跳過 Google 同意頁
+    private static final String COOKIE =
+        "CONSENT=PENDING+987; SOCS=CAESHAgBEhJnd3NfMjAyMzA4MTAtMF9SQzIaAmRlIAEaBgiAo_CmBg";
+
+    private static final String LAT = "([+-]?\\d{1,2}\\.\\d+)";
+    private static final String LON = "([+-]?\\d{1,3}\\.\\d+)";
 
     private void fail(String msg) {
         try {
@@ -31,28 +51,162 @@ public class MainActivity extends Activity {
                 text = in.getStringExtra(Intent.EXTRA_TEXT);
                 subject = in.getStringExtra(Intent.EXTRA_SUBJECT);
                 title = in.getStringExtra(Intent.EXTRA_TITLE);
+            } else if (in != null && Intent.ACTION_VIEW.equals(in.getAction()) && in.getData() != null) {
+                text = in.getDataString();
             }
 
-            String name = "";
-            if (text != null) name = text.replaceAll("https?://\\S+", "").trim();
-            if (name.isEmpty() && subject != null) name = subject.trim();
-            if (name.isEmpty() && title != null) name = title.trim();
-            int nl = name.indexOf('\n');
-            if (nl > 0) name = name.substring(0, nl).trim();
-
-            if (name.isEmpty()) {
-                fail("沒有收到地點名稱，請從 Google 地圖的地點頁按「分享」。\n\n收到的內容：\n" + text);
+            if (text == null) {
+                fail("請從 Google 地圖的地點頁按「分享」再選本程式");
                 return;
             }
 
-            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(
-                "androidamap://poi?sourceApplication=gaodeshare&keywords="
-                + Uri.encode(name) + "&dev=0"));
-            i.setPackage("com.autonavi.minimap");
+            Matcher m = Pattern.compile("https?://\\S+").matcher(text);
+            final String url = m.find() ? m.group() : null;
+
+            String n = text.replaceAll("https?://\\S+", "").trim();
+            if (n.isEmpty() && subject != null) n = subject.trim();
+            if (n.isEmpty() && title != null) n = title.trim();
+            int nl = n.indexOf('\n');
+            if (nl > 0) n = n.substring(0, nl).trim();
+            final String name = n;
+
+            if (url == null) {
+                if (name.isEmpty()) {
+                    fail("找不到網址或地點名稱\n\n收到的內容：\n" + text);
+                } else {
+                    searchByName(name);
+                }
+                return;
+            }
+
+            new Thread(() -> {
+                String[] c = null;
+                try {
+                    c = findCoords(url);
+                } catch (Throwable ignored) {
+                }
+                final String[] coords = c;
+                runOnUiThread(() -> {
+                    if (coords != null) {
+                        openAmap("androidamap://viewMap?sourceApplication=gaodeshare"
+                            + "&poiname=" + Uri.encode(name.isEmpty() ? "目的地" : name)
+                            + "&lat=" + coords[0] + "&lon=" + coords[1] + "&dev=1");
+                    } else if (!name.isEmpty()) {
+                        Toast.makeText(this, "沒抓到座標，改用名稱搜尋", Toast.LENGTH_SHORT).show();
+                        searchByName(name);
+                    } else {
+                        fail("沒抓到座標，也沒有地點名稱");
+                    }
+                });
+            }).start();
+        } catch (Throwable t) {
+            fail("啟動失敗：\n" + t);
+        }
+    }
+
+    private void searchByName(String name) {
+        openAmap("androidamap://poi?sourceApplication=gaodeshare&keywords="
+            + Uri.encode(name) + "&dev=0");
+    }
+
+    private void openAmap(String uri) {
+        Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(uri));
+        i.setPackage("com.autonavi.minimap");
+        try {
             startActivity(i);
             finish();
-        } catch (Throwable t) {
-            fail("錯誤：\n" + t);
+        } catch (Throwable e) {
+            fail("無法開啟高德地圖：\n" + e);
         }
+    }
+
+    private HttpURLConnection open(String u) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+        c.setInstanceFollowRedirects(false);
+        c.setRequestProperty("User-Agent", UA);
+        c.setRequestProperty("Cookie", COOKIE);
+        c.setRequestProperty("Accept-Language", "zh-TW,zh;q=0.9,en;q=0.8");
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(8000);
+        c.connect();
+        return c;
+    }
+
+    private String[] findCoords(String start) throws Exception {
+        String cur = start;
+        String body = null;
+        boolean retried = false;
+
+        for (int i = 0; i < 10; i++) {
+            String[] r = fromUrl(cur);
+            if (r != null) return r;
+
+            HttpURLConnection c = open(cur);
+            int code = c.getResponseCode();
+
+            if (code >= 300 && code < 400) {
+                String loc = c.getHeaderField("Location");
+                c.disconnect();
+                if (loc == null) return null;
+                cur = new URL(new URL(cur), loc).toString();
+                continue;
+            }
+            if (code == 404 && !retried) {
+                // Google 短網址偶爾會先回 404，等一下再試一次
+                retried = true;
+                c.disconnect();
+                Thread.sleep(3000);
+                continue;
+            }
+            if (code != 200) {
+                c.disconnect();
+                return null;
+            }
+            body = readBody(c);
+            c.disconnect();
+            break;
+        }
+
+        if (body == null) return null;
+        return fromBody(body);
+    }
+
+    private String readBody(HttpURLConnection c) throws Exception {
+        try (InputStream is = c.getInputStream()) {
+            ByteArrayOutputStream bo = new ByteArrayOutputStream();
+            byte[] buf = new byte[16384];
+            int k;
+            while ((k = is.read(buf)) > 0 && bo.size() < 3000000) bo.write(buf, 0, k);
+            return bo.toString("UTF-8");
+        }
+    }
+
+    private String[] m(String s, String pat) {
+        Matcher mm = Pattern.compile(pat).matcher(s);
+        if (mm.find()) return new String[]{mm.group(1), mm.group(2)};
+        return null;
+    }
+
+    private String[] fromUrl(String s) {
+        String[] r;
+        if ((r = m(s, "!3d" + LAT + "!4d" + LON)) != null) return r;
+        if ((r = m(s, "%213d" + LAT + "%214d" + LON)) != null) return r;
+        if ((r = m(s, "[?&](?:q|ll|destination|daddr)=" + LAT + "(?:,|%2C|\\+)" + LON)) != null) return r;
+        if ((r = m(s, "@" + LAT + "," + LON)) != null) return r;
+        return null;
+    }
+
+    private String[] fromBody(String body) {
+        String[] r;
+        if ((r = m(body, "%213d" + LAT + "%214d" + LON)) != null) return r;
+        if ((r = m(body, "\\[(?:null,null,|null,\\[)" + LAT + "," + LON + "]")) != null) return r;
+        if ((r = m(body, "/@" + LAT + "," + LON)) != null) return r;
+        // 網頁標題是泛用的「Google Maps」時，裡面的座標其實是你的網路位置，不能用
+        if (!body.contains("<meta content=\"Google Maps\" itemprop=\"name\"")) {
+            Matcher mm = Pattern.compile(
+                "APP_INITIALIZATION_STATE=\\[\\[\\[[\\d.-]+," + LON + "," + LAT).matcher(body);
+            if (mm.find()) return new String[]{mm.group(2), mm.group(1)};
+        }
+        return null;
     }
 }
