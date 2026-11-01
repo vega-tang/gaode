@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
-import android.widget.Toast;
 
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -207,8 +206,8 @@ public class MainActivity extends Activity {
 
     private void openRoute(String[] r) {
         if (r[3].isEmpty()) {
-            Toast.makeText(this, "路線沒抓到終點座標，改搜尋終點", Toast.LENGTH_SHORT).show();
-            searchByName(r[5]);
+            // 沒有座標：直接搜尋終點
+            searchByName(cleanAddress(r[5]));
             return;
         }
         StringBuilder sb = new StringBuilder("androidamap://route?sourceApplication=gaodeshare");
@@ -228,15 +227,20 @@ public class MainActivity extends Activity {
         return Pattern.compile("[市縣區鄉鎮路街段巷號]").matcher(s).find();
     }
 
+    /** 去掉開頭郵遞區號和「里」 */
+    private String cleanAddress(String a) {
+        if (a == null) return "";
+        a = a.trim().replaceFirst("^\\d+\\s*", "");
+        a = a.replaceFirst("(?<=[區鄉鎮])[\\u4e00-\\u9fa5]{1,4}里", "");
+        return a.trim();
+    }
+
     private String addressFromUrl(String u) {
         if (u == null) return "";
         Matcher mm = Pattern.compile("/place/([^/@?]+)").matcher(u);
         if (!mm.find()) return "";
         try {
-            String a = URLDecoder.decode(mm.group(1).replace("+", " "), "UTF-8").trim();
-            a = a.replaceFirst("^\\d+\\s*", "");
-            a = a.replaceFirst("(?<=[區鄉鎮])[\\u4e00-\\u9fa5]{1,4}里", "");
-            return a.trim();
+            return cleanAddress(URLDecoder.decode(mm.group(1).replace("+", " "), "UTF-8"));
         } catch (Exception e) {
             return "";
         }
