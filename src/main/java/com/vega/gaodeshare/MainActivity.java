@@ -12,6 +12,8 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLDecoder;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -28,6 +30,8 @@ public class MainActivity extends Activity {
     private static final String LON = "([+-]?\\d{1,3}\\.\\d+)";
 
     private volatile String lastUrl = "";
+    // {slat, slon, sname, dlat, dlon, dname, t}
+    private volatile String[] route = null;
 
     private void fail(String msg) {
         try {
@@ -57,7 +61,7 @@ public class MainActivity extends Activity {
             }
 
             if (text == null) {
-                fail("請從 Google 地圖的地點頁按「分享」再選本程式");
+                fail("請從 Google 地圖按「分享」再選本程式");
                 return;
             }
 
@@ -87,15 +91,19 @@ public class MainActivity extends Activity {
                 } catch (Throwable ignored) {
                 }
                 final String[] coords = c;
+                final String[] rt = route;
                 runOnUiThread(() -> {
-                    if (coords != null) {
+                    if (rt != null) {
+                        openRoute(rt);
+                    } else if (coords != null) {
                         openAmap("androidamap://viewMap?sourceApplication=gaodeshare"
                             + "&poiname=" + Uri.encode(name.isEmpty() ? "目的地" : name)
-                            + "&lat=" + coords[0] + "&lon=" + coords[1] + "&dev=1");
+                            + "&lat=" + coords[0] + "&lon=" + coords[1] + "&dev=0");
                     } else {
                         String keywords = buildKeywords(name, addressFromUrl(lastUrl));
                         if (keywords.isEmpty()) {
-                            fail("沒抓到座標，也沒有地點名稱或地址");
+                            String u = lastUrl.length() > 200 ? lastUrl.substring(0, 200) + "…" : lastUrl;
+                            fail("沒抓到座標，也沒有地點名稱或地址\n\n網址：\n" + u);
                         } else {
                             Toast.makeText(this, "沒抓到座標，改用名稱搜尋", Toast.LENGTH_SHORT).show();
                             searchByName(keywords);
@@ -107,6 +115,117 @@ public class MainActivity extends Activity {
             fail("啟動失敗：\n" + t);
         }
     }
+
+    // ---------- 路線 ----------
+
+    private String param(String u, String key) {
+        Matcher mm = Pattern.compile("[?&]" + key + "=([^&#]*)").matcher(u);
+        if (!mm.find()) return "";
+        try {
+            return URLDecoder.decode(mm.group(1), "UTF-8").trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String[] latLon(String s) {
+        Matcher mm = Pattern.compile("^\\s*(-?\\d+\\.\\d+)\\s*,\\s*(-?\\d+\\.\\d+)\\s*$").matcher(s);
+        if (mm.find()) return new String[]{mm.group(1), mm.group(2)};
+        return null;
+    }
+
+    private String[] parseRoute(String u) {
+        try {
+            String sname = "", dname = "";
+            int i = u.indexOf("/maps/dir/");
+            String rest = u.substring(i + "/maps/dir/".length());
+            int q = rest.indexOf('?');
+            if (q >= 0) rest = rest.substring(0, q);
+
+            List<String> names = new ArrayList<>();
+            for (String s : rest.split("/", -1)) {
+                if (s.startsWith("@") || s.startsWith("data=")) break;
+                names.add(URLDecoder.decode(s.replace("+", " "), "UTF-8").trim());
+            }
+            while (!names.isEmpty() && names.get(names.size() - 1).isEmpty()) {
+                names.remove(names.size() - 1);
+            }
+            if (!names.isEmpty()) {
+                dname = names.get(names.size() - 1);
+                if (names.size() >= 2) sname = names.get(0);
+            } else {
+                sname = param(u, "origin");
+                dname = param(u, "destination");
+            }
+            if (dname.isEmpty()) return null;
+
+            String slat = "", slon = "", dlat = "", dlon = "";
+
+            String[] sc = latLon(sname);
+            String[] dc = latLon(dname);
+            if (sc != null) { slat = sc[0]; slon = sc[1]; sname = "起點"; }
+            if (dc != null) { dlat = dc[0]; dlon = dc[1]; dname = "終點"; }
+
+            List<String[]> pts = new ArrayList<>();
+            Matcher mm = Pattern.compile("!1d" + LON + "!2d" + LAT).matcher(u);
+            while (mm.find()) pts.add(new String[]{mm.group(2), mm.group(1)});
+            if (pts.isEmpty()) {
+                mm = Pattern.compile("!3d" + LAT + "!4d" + LON).matcher(u);
+                while (mm.find()) pts.add(new String[]{mm.group(1), mm.group(2)});
+            }
+
+            boolean hasOrigin = !sname.isEmpty();
+            if (dlat.isEmpty() && !pts.isEmpty() && (!hasOrigin || pts.size() >= 2)) {
+                String[] p = pts.get(pts.size() - 1);
+                dlat = p[0];
+                dlon = p[1];
+            }
+            if (slat.isEmpty() && hasOrigin && pts.size() >= 2) {
+                String[] p = pts.get(0);
+                slat = p[0];
+                slon = p[1];
+            }
+
+            // Google: 0 開車 1 騎車 2 步行 3 大眾運輸
+            // 高德 t: 0 駕車 1 公交 2 步行 3 騎行
+            String t = "0";
+            Matcher tm = Pattern.compile("!3e(\\d)").matcher(u);
+            if (tm.find()) {
+                String g = tm.group(1);
+                if (g.equals("1")) t = "3";
+                else if (g.equals("2")) t = "2";
+                else if (g.equals("3")) t = "1";
+            } else {
+                String p = param(u, "travelmode");
+                if (p.equals("bicycling")) t = "3";
+                else if (p.equals("walking")) t = "2";
+                else if (p.equals("transit")) t = "1";
+            }
+
+            return new String[]{slat, slon, sname, dlat, dlon, dname, t};
+        } catch (Throwable e) {
+            return null;
+        }
+    }
+
+    private void openRoute(String[] r) {
+        if (r[3].isEmpty()) {
+            Toast.makeText(this, "路線沒抓到終點座標，改搜尋終點", Toast.LENGTH_SHORT).show();
+            searchByName(r[5]);
+            return;
+        }
+        StringBuilder sb = new StringBuilder("androidamap://route?sourceApplication=gaodeshare");
+        if (!r[0].isEmpty()) {
+            sb.append("&slat=").append(r[0]).append("&slon=").append(r[1]);
+            if (!r[2].isEmpty()) sb.append("&sname=").append(Uri.encode(r[2]));
+        }
+        sb.append("&dlat=").append(r[3]).append("&dlon=").append(r[4]);
+        sb.append("&dname=").append(Uri.encode(r[5]));
+        sb.append("&dev=0&t=").append(r[6]);
+        openAmap(sb.toString());
+    }
+
+    // ---------- 地點 ----------
 
     private boolean looksLikeAddress(String s) {
         return Pattern.compile("[市縣區鄉鎮路街段巷號]").matcher(s).find();
@@ -149,6 +268,8 @@ public class MainActivity extends Activity {
         }
     }
 
+    // ---------- 網路 ----------
+
     private HttpURLConnection open(String u) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
         c.setInstanceFollowRedirects(false);
@@ -168,6 +289,15 @@ public class MainActivity extends Activity {
 
         for (int i = 0; i < 10; i++) {
             lastUrl = cur;
+
+            if (cur.contains("/maps/dir/")) {
+                String[] rr = parseRoute(cur);
+                if (rr != null) {
+                    route = rr;
+                    return null;
+                }
+            }
+
             String[] r = fromUrl(cur);
             if (r != null) return r;
 
