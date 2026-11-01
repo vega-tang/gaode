@@ -7,8 +7,6 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.widget.Toast;
 
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLDecoder;
@@ -103,9 +101,8 @@ public class MainActivity extends Activity {
                         String keywords = buildKeywords(name, addressFromUrl(lastUrl));
                         if (keywords.isEmpty()) {
                             String u = lastUrl.length() > 200 ? lastUrl.substring(0, 200) + "…" : lastUrl;
-                            fail("沒抓到座標，也沒有地點名稱或地址\n\n網址：\n" + u);
+                            fail("沒有地點名稱或地址可搜尋\n\n網址：\n" + u);
                         } else {
-                            Toast.makeText(this, "沒抓到座標，改用名稱搜尋", Toast.LENGTH_SHORT).show();
                             searchByName(keywords);
                         }
                     }
@@ -282,9 +279,9 @@ public class MainActivity extends Activity {
         return c;
     }
 
+    /** 只展開短網址，不下載網頁；網址本身有座標或是路線才回傳資料 */
     private String[] findCoords(String start) throws Exception {
         String cur = start;
-        String body = null;
         boolean retried = false;
 
         for (int i = 0; i < 10; i++) {
@@ -300,6 +297,9 @@ public class MainActivity extends Activity {
 
             String[] r = fromUrl(cur);
             if (r != null) return r;
+
+            // 已經是完整的 Google 網址，不需要再連線
+            if (!cur.contains("goo.gl")) return null;
 
             HttpURLConnection c = open(cur);
             int code = c.getResponseCode();
@@ -317,27 +317,10 @@ public class MainActivity extends Activity {
                 Thread.sleep(3000);
                 continue;
             }
-            if (code != 200) {
-                c.disconnect();
-                return null;
-            }
-            body = readBody(c);
             c.disconnect();
-            break;
+            return null;
         }
-
-        if (body == null) return null;
-        return fromBody(body);
-    }
-
-    private String readBody(HttpURLConnection c) throws Exception {
-        try (InputStream is = c.getInputStream()) {
-            ByteArrayOutputStream bo = new ByteArrayOutputStream();
-            byte[] buf = new byte[16384];
-            int k;
-            while ((k = is.read(buf)) > 0 && bo.size() < 3000000) bo.write(buf, 0, k);
-            return bo.toString("UTF-8");
-        }
+        return null;
     }
 
     private String[] m(String s, String pat) {
@@ -352,19 +335,6 @@ public class MainActivity extends Activity {
         if ((r = m(s, "%213d" + LAT + "%214d" + LON)) != null) return r;
         if ((r = m(s, "[?&](?:q|ll|destination|daddr)=" + LAT + "(?:,|%2C|\\+)" + LON)) != null) return r;
         if ((r = m(s, "@" + LAT + "," + LON)) != null) return r;
-        return null;
-    }
-
-    private String[] fromBody(String body) {
-        String[] r;
-        if ((r = m(body, "%213d" + LAT + "%214d" + LON)) != null) return r;
-        if ((r = m(body, "\\[(?:null,null,|null,\\[)" + LAT + "," + LON + "]")) != null) return r;
-        if ((r = m(body, "/@" + LAT + "," + LON)) != null) return r;
-        if (!body.contains("<meta content=\"Google Maps\" itemprop=\"name\"")) {
-            Matcher mm = Pattern.compile(
-                "APP_INITIALIZATION_STATE=\\[\\[\\[[\\d.-]+," + LON + "," + LAT).matcher(body);
-            if (mm.find()) return new String[]{mm.group(2), mm.group(1)};
-        }
         return null;
     }
 }
